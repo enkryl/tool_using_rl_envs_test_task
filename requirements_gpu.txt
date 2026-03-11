@@ -1,0 +1,9 @@
+# GPU server dependencies (training + inference)
+torch>=2.1
+transformers>=4.40
+trl>=0.12
+peft>=0.10
+accelerate>=0.30
+wandb
+matplotlib
+pandas

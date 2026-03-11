@@ -1,0 +1,3 @@
+# Local dependencies (env, data generation, tests)
+# sqlite3, json, dataclasses, etc. are in stdlib
+pytest>=7.0
