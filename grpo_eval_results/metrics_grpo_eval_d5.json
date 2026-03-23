@@ -1,0 +1,11 @@
+{
+  "model": "grpo_vllm",
+  "bucket": "eval_d5",
+  "total_episodes": 100,
+  "success_rate": 0.0,
+  "mean_reward": -1.02,
+  "mean_steps": 1.0,
+  "mean_tool_calls": 0.0,
+  "mean_policy_violations": 0.0,
+  "time_seconds": 71.7706048488617
+}

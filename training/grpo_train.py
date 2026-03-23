@@ -150,6 +150,9 @@ class GRPOTrainer:
             trust_remote_code=True,
         )
         
+        # Enable gradient checkpointing to save VRAM
+        self.model.gradient_checkpointing_enable()
+        
         if self.config.use_lora:
             from peft import LoraConfig, get_peft_model
             
@@ -168,17 +171,6 @@ class GRPOTrainer:
             self.model.parameters(),
             lr=self.config.learning_rate,
         )
-        
-        # Reference model for KL penalty (frozen copy)
-        self.ref_model = AutoModelForCausalLM.from_pretrained(
-            self.config.model_name,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-            trust_remote_code=True,
-        )
-        self.ref_model.eval()
-        for p in self.ref_model.parameters():
-            p.requires_grad = False
     
     def load_data(self):
         """Load training and eval data."""
@@ -289,7 +281,7 @@ class GRPOTrainer:
         std_r = (sum((r - mean_r) ** 2 for r in rewards) / len(rewards)) ** 0.5 + 1e-8
         advantages = [(r - mean_r) / std_r for r in rewards]
         
-        total_loss = torch.tensor(0.0, device=self.model.device)
+        losses = []
         
         self.model.train()
         
@@ -325,9 +317,13 @@ class GRPOTrainer:
                 log_probs = -outputs.loss  # approximate per-token log prob
                 
                 # Weighted by advantage
-                total_loss += -advantage * log_probs
+                losses.append(-advantage * log_probs)
         
-        return total_loss / max(len(rollouts), 1)
+        if not losses:
+            # No valid updates — return zero tensor with grad so backward() is safe
+            return torch.tensor(0.0, device=self.model.device, requires_grad=True)
+        
+        return torch.stack(losses).mean()
     
     def train_step(self, batch: List[Data]) -> Dict[str, float]:
         """One training step: generate rollouts + update."""
@@ -348,11 +344,14 @@ class GRPOTrainer:
         self.optimizer.zero_grad()
         
         for data in batch:
-            # Generate G rollouts
+            # Generate G rollouts (no grad needed for generation)
             rollouts = []
             for g in range(self.config.num_generations):
                 rollout = self.generate_rollout(data)
                 rollouts.append(rollout)
+            
+            # Free generation cache
+            torch.cuda.empty_cache()
             
             rewards = [r["reward"] for r in rollouts]
             batch_metrics["mean_reward"] += sum(rewards) / len(rewards)
@@ -367,10 +366,15 @@ class GRPOTrainer:
                 batch_metrics["mean_tools"] += r["metrics"]["tool_calls"]
                 batch_metrics["mean_violations"] += r["metrics"]["policy_violations"]
             
-            # Compute loss
+            # Compute loss and backward immediately (saves VRAM vs accumulating)
             loss = self.compute_grpo_loss(rollouts, data)
-            loss.backward()
+            if loss.grad_fn is not None:
+                (loss / len(batch)).backward()  # scale by batch size for proper averaging
             batch_metrics["loss"] += loss.item()
+            
+            # Free loss graph
+            del rollouts, loss
+            torch.cuda.empty_cache()
         
         # Gradient step
         torch.nn.utils.clip_grad_norm_(
